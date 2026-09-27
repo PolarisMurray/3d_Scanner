@@ -1,0 +1,9 @@
+.venv/
+.venv.previous/
+.pio/
+__pycache__/
+.DS_Store
+output/
+data/planes/*.csv
+models/*.npz
+models/geometry.json
