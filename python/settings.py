@@ -27,14 +27,3 @@ PAN_CENTER = 90.0
 TILT_CENTER = 90.0
 PAN_TO_TILT_CM = [0.0, 0.0, 0.0]
 TILT_TO_SENSOR_CM = [1.5, -4.0, 0.0]
-
-
-def default_geometry():
-    return {
-        "pan_center_deg": PAN_CENTER,
-        "tilt_center_deg": TILT_CENTER,
-        "pan_to_tilt_cm": PAN_TO_TILT_CM,
-        "tilt_to_sensor_cm": TILT_TO_SENSOR_CM,
-        "parameters": [0.0] * 7,  # order: geometry.PARAMETER_NAMES
-        "calibrated": False,
-    }

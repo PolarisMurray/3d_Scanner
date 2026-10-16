@@ -15,8 +15,7 @@ import acquisition
 import backlash
 import calibrate
 from calibrate import fit_geometry
-from geometry import Geometry, fit_plane
-from settings import default_geometry
+from geometry import Geometry, default_geometry, fit_plane
 from sensor import SensorModel
 from surface import median_filter, mesh_faces, reconstruct, relief
 

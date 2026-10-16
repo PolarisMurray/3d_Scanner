@@ -7,8 +7,11 @@ from pathlib import Path
 import numpy as np
 from serial.tools import list_ports
 
-from acquisition import acquire, request_stop, tilt_direction
-from settings import BAUD_RATE, MEDIAN_WINDOW, OUTPUT, SERIAL_PORT
+from acquisition import acquire, open_port, request_stop, tilt_direction
+from settings import MEDIAN_WINDOW, OUTPUT, SERIAL_PORT
+
+# Heavy modules (Taichi, scikit-learn, matplotlib) are imported inside the commands
+# that need them, so `ports` and `stop` start instantly.
 
 
 def odd_window(text):
@@ -65,63 +68,92 @@ def parser():
     return cli
 
 
+def timestamp():
+    return datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+
+
+def list_serial_ports(args):
+    for port in list_ports.comports():
+        print(f"{port.device}  {port.description}")
+
+
+def scan_or_reconstruct(args):
+    from sensor import SensorModel
+    from surface import reconstruct
+    SensorModel()  # fail on a missing model before any servo moves
+    if args.command == "scan":
+        output = args.output or OUTPUT / f"scan_{timestamp()}"
+        raw = output / "raw.csv"
+        acquire(args.port, raw)
+    else:
+        output = args.output or OUTPUT / f"rebuild_{timestamp()}"
+        raw = args.csv
+    reconstruct(raw, output, show=not args.no_show, median=args.median,
+                distance_range=args.range)
+
+
+def capture_plane(args):
+    """Scan a flat board and label every sample with the board's plane equation n.p = d."""
+    import pandas as pd
+    from calibrate import PLANE_COLUMNS
+    normal = np.array(args.normal, dtype=float)
+    if not np.isfinite(normal).all() or np.linalg.norm(normal) == 0 or normal[2] == 0:
+        raise ValueError("Plane normal must be finite, nonzero, with a nonzero Z component")
+    normal /= np.linalg.norm(normal)
+    if args.from_raw:
+        frame = pd.read_csv(args.from_raw)
+    else:
+        frame = acquire(args.port, args.output.parent / "raw" / args.output.name)
+    # Direction needs the full acquisition order, so compute it before cropping.
+    frame["tilt_dir"] = tilt_direction(frame.tilt_deg)
+    frame = frame[frame.pan_deg.between(*args.pan) & frame.tilt_deg.between(*args.tilt)].copy()
+    frame[PLANE_COLUMNS] = np.tile([*normal, normal[2] * args.z], (len(frame), 1))
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    frame.to_csv(args.output, index=False)
+    print(f"Saved {len(frame)} plane samples: {args.output}")
+
+
+def run_calibrate(args):
+    from calibrate import calibrate
+    calibrate(args.files, args.fit_range, show=not args.no_show)
+
+
+def run_check(args):
+    from calibrate import check
+    check(args.files)
+
+
+def run_backlash(args):
+    import backlash
+    backlash.run(args.csv, save=args.save, show=not args.no_show)
+
+
+def run_noise(args):
+    import noise
+    noise.run(args.port, args.output or OUTPUT / f"noise_{timestamp()}.csv")
+
+
+def send_stop(args):
+    with open_port(args.port) as port:
+        request_stop(port)
+
+
+COMMANDS = {
+    "ports": list_serial_ports,
+    "scan": scan_or_reconstruct,
+    "reconstruct": scan_or_reconstruct,
+    "plane": capture_plane,
+    "calibrate": run_calibrate,
+    "check": run_check,
+    "backlash": run_backlash,
+    "noise": run_noise,
+    "stop": send_stop,
+}
+
+
 def main():
     args = parser().parse_args()
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    if args.command == "ports":
-        for port in list_ports.comports():
-            print(f"{port.device}  {port.description}")
-    elif args.command in ("scan", "reconstruct"):
-        # Load the model before starting physical motion.
-        from sensor import SensorModel
-        from surface import reconstruct
-        SensorModel()
-        if args.command == "scan":
-            output = args.output or OUTPUT / f"scan_{stamp}"
-            raw = output / "raw.csv"
-            acquire(args.port, raw)
-        else:
-            output = args.output or OUTPUT / f"rebuild_{stamp}"
-            raw = args.csv
-        reconstruct(raw, output, show=not args.no_show, median=args.median,
-                    distance_range=args.range)
-    elif args.command == "plane":
-        from calibrate import PLANE_COLUMNS
-        normal = np.array(args.normal, dtype=float)
-        if not np.isfinite(normal).all() or np.linalg.norm(normal) == 0 or normal[2] == 0:
-            raise ValueError("Plane normal must be finite, nonzero, with a nonzero Z component")
-        normal /= np.linalg.norm(normal)
-        if args.from_raw:
-            import pandas as pd
-            frame = pd.read_csv(args.from_raw)
-        else:
-            frame = acquire(args.port, args.output.parent / "raw" / args.output.name)
-        # Direction needs the full acquisition order, so compute it before cropping.
-        frame["tilt_dir"] = tilt_direction(frame.tilt_deg)
-        frame = frame[frame.pan_deg.between(*args.pan) & frame.tilt_deg.between(*args.tilt)].copy()
-        frame[PLANE_COLUMNS] = np.tile([*normal, normal[2] * args.z], (len(frame), 1))
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        frame.to_csv(args.output, index=False)
-        print(f"Saved {len(frame)} plane samples: {args.output}")
-    elif args.command == "calibrate":
-        from calibrate import calibrate
-        calibrate(args.files, args.fit_range, show=not args.no_show)
-    elif args.command == "check":
-        from calibrate import check
-        check(args.files)
-    elif args.command == "backlash":
-        import backlash
-        backlash.run(args.csv, save=args.save, show=not args.no_show)
-    elif args.command == "noise":
-        import noise
-        noise.run(args.port, args.output or OUTPUT / f"noise_{stamp}.csv")
-    elif args.command == "stop":
-        import serial
-        import time
-        from settings import RESET_WAIT_SECONDS
-        with serial.Serial(args.port, BAUD_RATE, timeout=0.5) as port:
-            time.sleep(RESET_WAIT_SECONDS)
-            request_stop(port)
+    COMMANDS[args.command](args)
 
 
 if __name__ == "__main__":

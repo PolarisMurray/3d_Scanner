@@ -6,12 +6,15 @@ import json
 import numpy as np
 import taichi as ti
 
-from settings import GEOMETRY, default_geometry
+from common import robust_sigma, write_json
+from settings import GEOMETRY, PAN_CENTER, PAN_TO_TILT_CM, TILT_CENTER, TILT_TO_SENSOR_CM
 
+# Correction parameters, in this order in geometry.json "parameters".
 PARAMETER_NAMES = ["pan_zero_deg", "tilt_zero_deg", "pan_scale_percent",
                    "tilt_scale_percent", "range_scale_percent", "range_bias_cm",
                    "tilt_lag_deg"]
 N_PARAMETERS = len(PARAMETER_NAMES)
+PAN_ZERO, TILT_ZERO, PAN_SCALE, TILT_SCALE, RANGE_SCALE, RANGE_BIAS, TILT_LAG = range(N_PARAMETERS)
 _initialized = False
 
 
@@ -24,8 +27,28 @@ def initialize():
         _initialized = True
 
 
+def default_geometry():
+    return {
+        "pan_center_deg": PAN_CENTER,
+        "tilt_center_deg": TILT_CENTER,
+        "pan_to_tilt_cm": PAN_TO_TILT_CM,
+        "tilt_to_sensor_cm": TILT_TO_SENSOR_CM,
+        "parameters": [0.0] * N_PARAMETERS,
+        "calibrated": False,
+    }
+
+
 def load_geometry(path=GEOMETRY):
     return json.loads(path.read_text()) if path.exists() else default_geometry()
+
+
+def save_geometry(config, path=GEOMETRY):
+    write_json(path, config)
+
+
+def corrected_distance(distance, parameters):
+    """Range scale/bias correction; Geometry.point applies the same formula."""
+    return distance * (1 + parameters[RANGE_SCALE] / 100) + parameters[RANGE_BIAS]
 
 
 def fit_plane(xyz, clip=3.0, rounds=10):
@@ -39,7 +62,7 @@ def fit_plane(xyz, clip=3.0, rounds=10):
     for _ in range(rounds):
         a, b, c = np.linalg.lstsq(design[keep], xyz[keep, 2], rcond=None)[0]
         residual = xyz[:, 2] - design @ [a, b, c]
-        limit = max(clip * 1.4826 * np.median(np.abs(residual[keep])), 0.05)
+        limit = max(clip * robust_sigma(residual[keep]), 0.05)
         inliers = np.abs(residual) <= limit
         if inliers.sum() < 3 or np.array_equal(inliers, keep):
             break
@@ -75,22 +98,21 @@ class Geometry:
 
     @ti.func
     def point(self, i):
-        a = self.samples[i]
+        pan, tilt, distance, direction = self.samples[i]
+        p = ti.static(self.params)
         # Servo stops short of the command in its direction of travel.
-        tilt = a[1] - a[3] * self.params[6]
-        theta = ((a[0] - self.pan_center) * (1 + self.params[2] / 100)
-                 + self.params[0]) * (np.pi / 180)
-        phi = ((tilt - self.tilt_center) * (1 + self.params[3] / 100)
-               + self.params[1]) * (np.pi / 180)
-        distance = a[2] * (1 + self.params[4] / 100) + self.params[5]
+        tilt -= direction * p[TILT_LAG]
+        theta = ((pan - self.pan_center) * (1 + p[PAN_SCALE] / 100) + p[PAN_ZERO]) * (np.pi / 180)
+        phi = ((tilt - self.tilt_center) * (1 + p[TILT_SCALE] / 100) + p[TILT_ZERO]) * (np.pi / 180)
+        distance = distance * (1 + p[RANGE_SCALE] / 100) + p[RANGE_BIAS]
         sensor = self.arm[1] + ti.Vector([0.0, 0.0, distance])
         # Tilt about +X, then pan about +Y; smaller tilt points upward.
         tilted = ti.Vector([sensor[0],
                             ti.cos(phi) * sensor[1] - ti.sin(phi) * sensor[2],
                             ti.sin(phi) * sensor[1] + ti.cos(phi) * sensor[2]])
-        p = self.arm[0] + tilted
-        return ti.Vector([ti.cos(theta) * p[0] + ti.sin(theta) * p[2], p[1],
-                          -ti.sin(theta) * p[0] + ti.cos(theta) * p[2]])
+        q = self.arm[0] + tilted
+        return ti.Vector([ti.cos(theta) * q[0] + ti.sin(theta) * q[2], q[1],
+                          -ti.sin(theta) * q[0] + ti.cos(theta) * q[2]])
 
     @ti.kernel
     def reconstruct(self):
@@ -100,12 +122,12 @@ class Geometry:
     @ti.kernel
     def plane_loss(self):
         for i in range(self.n):
-            p = self.point(i)
             plane = self.planes[i]
-            residual = (p.dot(ti.Vector([plane[0], plane[1], plane[2]])) - plane[3]
-                        - self.shift[self.board[i]])
+            normal = ti.Vector([plane[0], plane[1], plane[2]])
+            residual = self.point(i).dot(normal) - plane[3] - self.shift[self.board[i]]
             # Smooth robust loss: large outliers have less influence (delta = 1 cm).
             self.loss[None] += 2 * (ti.sqrt(1 + residual * residual) - 1) / self.n
+        # Tiny ridge term keeps parameters the boards cannot see near zero.
         for j in range(N_PARAMETERS):
             self.loss[None] += 0.00001 * self.params[j] ** 2
 

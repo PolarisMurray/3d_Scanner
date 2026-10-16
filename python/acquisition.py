@@ -2,6 +2,7 @@
 
 import csv
 import time
+from contextlib import contextmanager
 
 import numpy as np
 import pandas as pd
@@ -30,7 +31,17 @@ def load_raw(path):
     return raw[np.isfinite(raw[RAW_COLUMNS]).all(axis=1)].reset_index(drop=True)
 
 
+@contextmanager
+def open_port(port_name):
+    """Opening the port resets the Uno; wait for it to boot and drop its start-up bytes."""
+    with serial.Serial(port_name, BAUD_RATE, timeout=0.5) as port:
+        time.sleep(RESET_WAIT_SECONDS)
+        port.reset_input_buffer()
+        yield port
+
+
 def read_scan(port):
+    """Yield the numbers of each DATA line until SCAN_COMPLETE."""
     buffer = b""
     last_received = time.monotonic()
     while True:
@@ -40,15 +51,19 @@ def read_scan(port):
             last_received = time.monotonic()
         elif time.monotonic() - last_received > SERIAL_IDLE_SECONDS:
             raise TimeoutError("Arduino has stopped sending data")
+        # readline can return part of a line; only parse complete lines.
         while b"\n" in buffer:
             line, buffer = buffer.split(b"\n", 1)
-            line = line.decode("ascii").strip()
+            line = line.decode("ascii", errors="replace").strip()
             if line == "SCAN_COMPLETE":
                 return
             if line == "SCAN_ABORTED":
                 raise RuntimeError("Arduino stopped the scan")
             if line.startswith("DATA,"):
-                yield tuple(map(float, line.split(",")[1:]))
+                try:
+                    yield tuple(map(float, line.split(",")[1:]))
+                except ValueError:
+                    print(f"Skipped corrupted line: {line!r}")
 
 
 def request_stop(port):
@@ -63,11 +78,9 @@ def request_stop(port):
 
 
 def acquire(port_name, output, command=b"s", columns=RAW_COLUMNS):
+    """Send `command`, stream every DATA row to `output` as it arrives, return the CSV."""
     output.parent.mkdir(parents=True, exist_ok=True)
-    with serial.Serial(port_name, BAUD_RATE, timeout=0.5) as port, \
-            output.open("w", newline="") as stream:
-        time.sleep(RESET_WAIT_SECONDS)
-        port.reset_input_buffer()
+    with open_port(port_name) as port, output.open("w", newline="") as stream:
         writer = csv.writer(stream)
         writer.writerow(columns)
         port.write(command)
@@ -78,6 +91,7 @@ def acquire(port_name, output, command=b"s", columns=RAW_COLUMNS):
                 if count % 50 == 0:
                     print(f"Received {count} samples")
         except BaseException:
+            # Any failure, including Ctrl-C, must release the servos.
             try:
                 request_stop(port)
             except serial.SerialException:

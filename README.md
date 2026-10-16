@@ -1,3 +1,4 @@
+<<<<<<< Updated upstream
 # Dual-Servo 3D Scanner
 
 A dual-servo scanner using an infrared distance sensor to build depth maps, relief images, and 3D models.
@@ -203,3 +204,48 @@ output/
 ```
 
 for the generated depth map, relief image, surface visualization, and 3D mesh.
+=======
+# 3D Scanner
+
+Low-cost pan-tilt IR 3D scanner: Arduino Uno + two servos + a Sharp GP2Y0A IR range sensor,
+with a Python pipeline that calibrates the sensor (MLP), estimates servo backlash, self-calibrates
+the geometry with Taichi autodiff, and reconstructs a meshed point cloud.
+
+- Project report (results, resume bullets): [English](docs/PROJECT_REPORT.md) · [中文](docs/PROJECT_REPORT_zh.md)
+- How it works (principles and math): [docs/PRINCIPLES.md](docs/PRINCIPLES.md)
+
+![relief](docs/images/scan_relief.png)
+
+## Setup
+
+```bash
+python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt
+```
+
+Flash the firmware with PlatformIO (`pio run -t upload`). Set `SERIAL_PORT` in
+`python/settings.py` (list ports with `python python/scanner.py ports`).
+
+## Usage
+
+All commands run from the repository root with `.venv/bin/python`.
+
+| Step | Command |
+|---|---|
+| Train the sensor model | `python/train_mlp.py` (`--errors-only` to evaluate the saved model) |
+| Scan and reconstruct | `python/scanner.py scan` |
+| Rebuild a saved scan | `python/scanner.py reconstruct output/<scan>/raw.csv` |
+| Estimate servo backlash | `python/scanner.py backlash output/<scan>/raw.csv --save` |
+| Capture a flat board | `python/scanner.py plane --z 45 --output data/planes/board45.csv` |
+| Calibrate geometry | `python/scanner.py calibrate data/planes/*.csv` |
+| Check on unused boards | `python/scanner.py check data/planes/board60.csv` |
+| Measure sensor noise | `python/scanner.py noise` |
+| Release the servos | `python/scanner.py stop` |
+
+Add `--no-show` to skip plot windows. Results go to `output/`.
+
+## Tests
+
+```bash
+.venv/bin/python -m unittest tests/test_pipeline.py
+```
+>>>>>>> Stashed changes

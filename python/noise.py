@@ -8,24 +8,23 @@ firmware method (median of 7 readings 40 ms apart), in volts and in cm.
 import numpy as np
 
 from acquisition import acquire
+from common import robust_sigma
 from sensor import SensorModel
 
-PHASES = {1: "servos holding", 0: "servos released"}
+PHASES = {1: "servos holding", 0: "servos released"}  # phase ids sent by the firmware
 OLD_WINDOW_MS = 50
+# Mirror SENSOR_SAMPLES / SENSOR_SAMPLE_INTERVAL in src/main.cpp.
 NEW_SAMPLES, NEW_SPACING_MS = 7, 40
 
 
-def robust_sd(values):
-    values = np.asarray(values)
-    return float(1.4826 * np.median(np.abs(values - np.median(values))))
-
-
 def old_method(ms, volts):
+    """Simulate one point per 50 ms block: the mean of every reading in the block."""
     blocks = (ms - ms[0]) // OLD_WINDOW_MS
     return np.array([volts[blocks == b].mean() for b in np.unique(blocks)[:-1]])
 
 
 def new_method(ms, volts):
+    """Simulate one point per firmware measurement: median of 7 readings 40 ms apart."""
     points, start = [], ms[0]
     span = (NEW_SAMPLES - 1) * NEW_SPACING_MS
     while start + span <= ms[-1]:
@@ -59,6 +58,6 @@ def run(port, output):
         for label, values in (("single reading", volts),
                               ("old: mean 10 in 50 ms", old_method(ms, volts)),
                               ("new: median 7 x 40 ms", new_method(ms, volts))):
-            sd = robust_sd(values)
+            sd = robust_sigma(values, np.median(values))
             print(f"  {label:<24} sd {sd:.4f} V = {sd * scale:5.2f} cm  "
                   f"(max jump {np.ptp(values):.3f} V, n={len(values)})")

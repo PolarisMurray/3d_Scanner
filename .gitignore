@@ -7,3 +7,7 @@ output/
 data/planes/*.csv
 models/*.npz
 models/geometry.json
+
+# PlatformIO regenerates these with machine-specific paths
+.vscode/c_cpp_properties.json
+.vscode/launch.json

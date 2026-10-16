@@ -6,22 +6,25 @@ The lag that best aligns neighboring columns is the estimate. Raw voltage is use
 so the result does not depend on the distance model.
 """
 
-import json
-
 import matplotlib.pyplot as plt
 import numpy as np
 
 from acquisition import load_raw
-from geometry import PARAMETER_NAMES, load_geometry
+from common import save_figure
+from geometry import TILT_LAG, load_geometry, save_geometry
 from settings import GEOMETRY, OUTPUT
 
-LAGS_DEG = np.round(np.arange(-2, 2.001, 0.05), 2)
+LAG_STEP_DEG = 0.05
+LAGS_DEG = np.round(np.arange(-2, 2 + LAG_STEP_DEG / 2, LAG_STEP_DEG), 2)
 # Both columns are smoothed alike; plain interpolation would favor half-sample shifts.
 SMOOTH_DEG = 1.5
-LAG_INDEX = PARAMETER_NAMES.index("tilt_lag_deg")
+# A reliable minimum costs at least 5 % less than the lags 0.75 deg to either side.
+CHECK_OFFSET = round(0.75 / LAG_STEP_DEG)
+MIN_CONTRAST = 1.05
 
 
 def columns(raw):
+    """(tilt, direction, voltage) per complete pan column, sorted by tilt."""
     ordered = raw.sort_values("tilt_deg", kind="stable")
     cols = [(c.tilt_deg.to_numpy(), c.tilt_dir.to_numpy(), c.voltage_V.to_numpy())
             for _, c in ordered.groupby("pan_deg")]
@@ -46,9 +49,9 @@ def estimate(raw):
     at = np.arange(cols[0][0].min() + edge, cols[0][0].max() - edge + 1e-9, 0.25)
     costs = np.array([mismatch(cols, lag, at) for lag in LAGS_DEG])
     best = int(costs.argmin())
-    # Reliable only with a clear interior minimum: +-0.75 deg must cost at least 5 % more.
-    near = [costs[i] for i in (best - 15, best + 15) if 0 <= i < len(costs)]
-    reliable = 0 < best < len(costs) - 1 and min(near) > 1.05 * costs[best]
+    # Reliable only with a clear interior minimum, not at the edge of the search range.
+    near = [costs[i] for i in (best - CHECK_OFFSET, best + CHECK_OFFSET) if 0 <= i < len(costs)]
+    reliable = 0 < best < len(costs) - 1 and min(near) > MIN_CONTRAST * costs[best]
     return float(LAGS_DEG[best]), costs, reliable
 
 
@@ -78,11 +81,7 @@ def plot(raw, lag, costs, show):
         ax.invert_yaxis()
         ax.set(xlabel="Pan command (deg)", ylabel="Tilt (deg)", title=title)
     fig.colorbar(image, ax=axes[1:], label="Sensor voltage (V), higher = closer")
-    OUTPUT.mkdir(exist_ok=True)
-    fig.savefig(OUTPUT / "backlash.png", dpi=160)
-    if show:
-        plt.show()
-    plt.close(fig)
+    save_figure(fig, OUTPUT / "backlash.png", show)
 
 
 def run(path, save=False, show=True):
@@ -97,9 +96,8 @@ def run(path, save=False, show=True):
         print("Not reliable: the scan needs sharp edges crossing many columns. Nothing saved.")
     elif save:
         config = load_geometry(GEOMETRY)
-        config["parameters"][LAG_INDEX] = lag
+        config["parameters"][TILT_LAG] = lag
         config["tilt_lag_source"] = str(path.resolve())
-        GEOMETRY.parent.mkdir(exist_ok=True)
-        GEOMETRY.write_text(json.dumps(config, indent=2) + "\n")
+        save_geometry(config, GEOMETRY)
         print(f"Saved lag to {GEOMETRY}")
     return lag, reliable

@@ -1,6 +1,5 @@
 """Depth grid, optional median filter, relief height, mesh, plots and PLY."""
 
-import json
 import warnings
 
 import matplotlib.pyplot as plt
@@ -8,7 +7,8 @@ import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 
 from acquisition import load_raw
-from geometry import Geometry, PARAMETER_NAMES, fit_plane, load_geometry
+from common import MAD_TO_SIGMA, write_json
+from geometry import TILT_LAG, Geometry, corrected_distance, fit_plane, load_geometry
 from sensor import SensorModel
 from settings import MAX_MESH_EDGE_CM, MEDIAN_WINDOW, PAN_STEP_DEG, TILT_STEP_DEG
 
@@ -41,10 +41,13 @@ def median_filter(grid, size):
 
 
 def noise(grid):
-    """Per-sample noise from second differences along tilt; robust to occasional edges."""
+    """Per-sample noise from second differences along tilt; robust to occasional edges.
+
+    On a smooth surface x[i+1] - 2 x[i] + x[i-1] is pure noise with variance 6 sigma^2.
+    """
     second = (grid[2:] - 2 * grid[1:-1] + grid[:-2]).ravel()
     second = second[np.isfinite(second)]
-    return float(1.4826 * np.median(np.abs(second)) / np.sqrt(6)) if len(second) else None
+    return float(MAD_TO_SIGMA * np.median(np.abs(second)) / np.sqrt(6)) if len(second) else None
 
 
 def mesh_faces(indices, xyz, edge_limit=MAX_MESH_EDGE_CM):
@@ -159,59 +162,70 @@ def plot_results(cloud, pan, tilt, grids, faces, base, output, show):
     plt.close("all")
 
 
-def reconstruct(raw_path, output, show=True, median=MEDIAN_WINDOW,
-                distance_range=None):
+def write_outputs(output, cloud, pan, tilt, grids, valid, xyz, faces, used):
+    output.mkdir(parents=True, exist_ok=True)
+    cloud.to_csv(output / "points.csv", index=False)
+    np.savez(output / "depth.npz", pan_deg=pan, tilt_deg=tilt, valid=valid, **grids)
+    write_ply(output / "surface.ply", xyz, faces)
+    write_json(output / "geometry_used.json", used)
+
+
+def reconstruct(raw_path, output, show=True, median=MEDIAN_WINDOW, distance_range=None):
+    """raw.csv -> points.csv, depth.npz, surface.ply, geometry_used.json and plots."""
     raw = load_raw(raw_path)
     config = load_geometry()
-    scale, bias = 1 + config["parameters"][4] / 100, config["parameters"][5]
+    parameters = config["parameters"]
     sensor = SensorModel()
-    measured = sensor.predict(raw.voltage_V) if len(raw) else np.array([])
-    # Use the voltage interval learned from the calibration CSV, not a fixed object distance.
+
+    # 1. Voltage -> distance. Keep voltages inside the calibration data, not a fixed distance.
+    model_cm = sensor.predict(raw.voltage_V) if len(raw) else np.array([])
     keep = sensor.measured_voltage(raw.voltage_V)
     outside_model = int((~keep).sum())
     if distance_range is not None:
-        low, high = distance_range
-        keep &= (measured * scale + bias >= low) & (measured * scale + bias <= high)
+        corrected = corrected_distance(model_cm, parameters)
+        keep &= (corrected >= distance_range[0]) & (corrected <= distance_range[1])
     cloud = raw.loc[keep, ["pan_deg", "tilt_deg", "voltage_V", "tilt_dir"]].reset_index(drop=True)
+
+    # 2. Place kept samples on the full pan/tilt command grid; gaps stay NaN.
     pan = scan_axis(raw.pan_deg, PAN_STEP_DEG)
     tilt = scan_axis(raw.tilt_deg, TILT_STEP_DEG)
     rows, cols = np.searchsorted(tilt, cloud.tilt_deg), np.searchsorted(pan, cloud.pan_deg)
-    grid = np.full((len(tilt), len(pan)), np.nan)
-    grid[rows, cols] = measured[keep]
-    volts = np.full(grid.shape, np.nan)
-    volts[rows, cols] = cloud.voltage_V
-    noise_v, noise_cm = noise(volts), noise(grid)
-    measured = median_filter(grid, median)[rows, cols]
-    samples = np.column_stack([cloud.pan_deg, cloud.tilt_deg, measured, cloud.tilt_dir])
+
+    def to_grid(values):
+        grid = np.full((len(tilt), len(pan)), np.nan)
+        grid[rows, cols] = values
+        return grid
+
+    distance_grid = to_grid(model_cm[keep])
+    noise_v, noise_cm = noise(to_grid(cloud.voltage_V)), noise(distance_grid)
+
+    # 3. Median filter on the grid, kinematics to XYZ, then height above the base plane.
+    filtered_cm = median_filter(distance_grid, median)[rows, cols]
+    samples = np.column_stack([cloud.pan_deg, cloud.tilt_deg, filtered_cm, cloud.tilt_dir])
     xyz = Geometry(samples, config).points() if len(cloud) else np.empty((0, 3))
     height, base = relief(xyz)
-    cloud["distance_cm"] = measured * scale + bias
+    cloud["distance_cm"] = corrected_distance(filtered_cm, parameters)
     cloud[["x_cm", "y_cm", "z_cm"]] = xyz
     cloud["height_cm"] = height
-    indices = np.full(grid.shape, -1)
+
+    # 4. Mesh grid neighbors, then save everything.
+    indices = np.full(distance_grid.shape, -1)
     indices[rows, cols] = np.arange(len(cloud))
     faces = mesh_faces(indices, xyz)
-    grids = {name: np.full(grid.shape, np.nan) for name in GRIDS}
-    for name, values in grids.items():
-        values[rows, cols] = cloud[name]
-
-    output.mkdir(parents=True, exist_ok=True)
-    cloud.to_csv(output / "points.csv", index=False)
-    np.savez(output / "depth.npz", pan_deg=pan, tilt_deg=tilt, valid=indices >= 0, **grids)
-    write_ply(output / "surface.ply", xyz, faces)
+    grids = {name: to_grid(cloud[name]) for name in GRIDS}
+    vmin, vmax = sensor.weights["voltage_range"].tolist()
     used = dict(config, reconstruction={"distance_range_cm": distance_range,
-                                        "voltage_range_V": sensor.weights["voltage_range"].tolist(),
+                                        "voltage_range_V": [vmin, vmax],
                                         "median_window": median,
                                         "noise_V": noise_v, "noise_cm": noise_cm})
-    (output / "geometry_used.json").write_text(json.dumps(used, indent=2) + "\n")
-    lag = config["parameters"][PARAMETER_NAMES.index("tilt_lag_deg")]
-    vmin, vmax = sensor.weights["voltage_range"]
+    write_outputs(output, cloud, pan, tilt, grids, indices >= 0, xyz, faces, used)
+
     print(f"Kept {len(cloud)}/{len(raw)} points; {len(faces)} triangles")
     print(f"Model voltage domain: {vmin:g}..{vmax:g} V; {outside_model} points outside training data")
     if distance_range is not None:
-        print(f"Additional distance crop: {low:g}..{high:g} cm")
+        print(f"Additional distance crop: {distance_range[0]:g}..{distance_range[1]:g} cm")
     print(f"Geometry: {'plane-calibrated' if config['calibrated'] else 'not plane-calibrated'}, "
-          f"tilt lag {lag:+.2f} deg, median window {median}")
+          f"tilt lag {parameters[TILT_LAG]:+.2f} deg, median window {median}")
     if noise_cm is not None:
         print(f"Noise estimate before median: {noise_v:.3f} V = {noise_cm:.2f} cm per sample")
     if cloud.empty:
