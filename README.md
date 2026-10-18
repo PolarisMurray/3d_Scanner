@@ -1,7 +1,10 @@
-<<<<<<< Updated upstream
 # Dual-Servo 3D Scanner
 
-A dual-servo scanner using an infrared distance sensor to build depth maps, relief images, and 3D models.
+Low-cost pan-tilt IR 3D scanner: Arduino Uno + two servos + a Sharp GP2Y0A IR range sensor,
+with a Python pipeline that calibrates the sensor (MLP), estimates servo backlash, self-calibrates
+the geometry with Taichi autodiff, and reconstructs a meshed point cloud.
+
+![relief](docs/images/scan_relief.png)
 
 ## 1. Setup & Installation
 
@@ -19,7 +22,7 @@ A dual-servo scanner using an infrared distance sensor to build depth maps, reli
 Open Terminal in the project directory, then run:
 
 ```bash
-cd Final_PIE_2
+cd 3d_Scanner
 ```
 
 ### Step 2: Create a Python 3.12 Virtual Environment
@@ -191,7 +194,7 @@ Triangle Mesh (.ply)
 ## 7. Typical Usage
 
 ```bash
-cd Final_PIE_2
+cd 3d_Scanner
 source .venv/bin/activate
 python python/scanner.py ports
 python python/scanner.py scan --port /dev/cu.usbmodem1101
@@ -204,28 +207,8 @@ output/
 ```
 
 for the generated depth map, relief image, surface visualization, and 3D mesh.
-=======
-# 3D Scanner
 
-Low-cost pan-tilt IR 3D scanner: Arduino Uno + two servos + a Sharp GP2Y0A IR range sensor,
-with a Python pipeline that calibrates the sensor (MLP), estimates servo backlash, self-calibrates
-the geometry with Taichi autodiff, and reconstructs a meshed point cloud.
-
-- Project report (results, resume bullets): [English](docs/PROJECT_REPORT.md) · [中文](docs/PROJECT_REPORT_zh.md)
-- How it works (principles and math): [docs/PRINCIPLES.md](docs/PRINCIPLES.md)
-
-![relief](docs/images/scan_relief.png)
-
-## Setup
-
-```bash
-python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt
-```
-
-Flash the firmware with PlatformIO (`pio run -t upload`). Set `SERIAL_PORT` in
-`python/settings.py` (list ports with `python python/scanner.py ports`).
-
-## Usage
+## 8. All Commands
 
 All commands run from the repository root with `.venv/bin/python`.
 
@@ -243,9 +226,8 @@ All commands run from the repository root with `.venv/bin/python`.
 
 Add `--no-show` to skip plot windows. Results go to `output/`.
 
-## Tests
+## 9. Tests
 
 ```bash
 .venv/bin/python -m unittest tests/test_pipeline.py
 ```
->>>>>>> Stashed changes
